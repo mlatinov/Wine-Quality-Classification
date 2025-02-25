@@ -1,12 +1,14 @@
 
 
 #### Libraries ####
-
+set.seed(123)
 library(tidyverse)
 library(caret)
 library(h2o)
 library(ROCR)
 library(earth)
+library(ranger)
+library(vip)
 ## Load the data from EDA FE
 
 # Preprocess data
@@ -180,11 +182,11 @@ knn_grid <- expand.grid(k = seq(1, k_value, by = 2))
 # Correct the category to follow Caret 
 train_reg$category_good <- factor(train_reg$category_good, 
                                   levels = c("0", "1"), 
-                                  labels = c("negative", "positive"))
+                                  labels = c("bad", "good"))
 
 test_reg$category_good <- factor(test_reg$category_good, 
                                   levels = c("0", "1"), 
-                                  labels = c("negative", "positive"))
+                                  labels = c("bad", "good"))
 
 # Fit a KNN model and perform a Grid Search
 knn_model <- train(
@@ -202,8 +204,8 @@ knn_model_pred <- predict(knn_model,test_reg)
 
 # Create a confusion matrix
 confusionMatrix(
-  data = relevel(knn_model_pred,ref = "negative"),
-  reference = relevel(test_reg$category_good,ref = "negative")
+  data = relevel(knn_model_pred,ref = "bad"),
+  reference = relevel(test_reg$category_good,ref = "bad")
 )
 
 # Note :
@@ -235,8 +237,8 @@ mars_prediction <- predict(mars_model,test_reg)
 
 # Make a Confusion Matrix 
 confusionMatrix(
-  data = relevel(mars_prediction,ref = "negative"),
-  reference = relevel(test_reg$category_good,ref = "negative")
+  data = relevel(mars_prediction,ref = "bad"),
+  reference = relevel(test_reg$category_good,ref = "bad")
 )
 
 # Note : MARS 
@@ -244,9 +246,127 @@ confusionMatrix(
  # Sensitivity : 0.4714        
  #  Specificity : 0.8133 
 
+#### Random Forest ####
 
+# Starting H2O
+h2o.init()
 
+# Convert the training set as h20 objects
+train_h2o <- as.h2o(train_reg)
 
+# Set the response column to category_good
+responce <- "category_good"
 
+# Set the predictors names
+predictors <- setdiff(colnames(train_reg),responce)
 
+## Make a hyper grid
 
+# Specify n_features
+n_features <- ncol(train_reg)-1
+
+h2o_hyper_grid <- list(
+  
+  # Tune Split-variable randomization
+  mtries = pmax(floor(n_features * c(.05, .15, .25, .333, .4)), 1),
+  
+  # Tune minimum number of observations in a leaf node 
+  min_rows = c(1,3,5,10),
+  
+  # Tune  how many splits the tree can have
+  max_depth = c(10,20,30),
+  
+  # Tune the  fraction of rows to sample for training each tree
+  sample_rate = c(.5,.6,.7,.8)
+)
+
+## Make a search strategy grid
+search_criteria <- list(
+  strategy ="RandomDiscrete", # Randomly selects combinations of the hyper parameters from the grid
+  
+  stopping_metric = "auc", # Metric used to monitor the performance 
+  
+  stopping_tolerance = 0.001, # Improvement in MSE is less than 0.001, the model will stop
+  
+  stopping_rounds = 10, # Iterations without improvement before stopping the training process
+  
+  max_runtime_secs = 60*5 # Max runtime  5min
+)
+
+## Execute the grid
+
+random_grid <- h2o.grid(
+  algorithm = "randomForest",
+  grid_id = "rf_random_grid",
+  x = predictors,
+  y = responce,
+  training_frame = train_h2o,
+  hyper_params = h2o_hyper_grid,     # h2o_hyper_grid defined earlier
+  search_criteria = search_criteria, # Search criteria for the grid search
+  ntrees = 10 * n_features,          # Number of trees in the forest
+  stopping_metric = "auc",           # Stopping metric: AUC for binary classification
+  stopping_rounds = 10,              # Stop after 10 rounds without improvement
+  stopping_tolerance = 0.005
+)
+
+# Check the best results 
+grid_result <- h2o.getGrid(grid_id = "rf_random_grid",
+                           sort_by = "auc",
+                           decreasing = FALSE)
+# max_depth: 30.00000  
+# min_rows: 1.00000
+# mtries:3.00000     
+# sample_rate:0.80000 
+# This this the result is AUC:0.88513
+
+## Re-run the model with more ntrees and importance metricts 
+
+# Re-run Impurity based importance
+ranger_impurity <- ranger(
+  category_good ~ .,
+  data = train_reg,
+  max.depth = 30.00000,
+  num.trees = 2000,
+  mtry = 3,
+  sample.fraction = 0.80000,
+  importance = "impurity",
+  min.node.size = 1
+)
+
+# Re-run Permutation based importance
+ranger_permitaion <- ranger(
+  category_good ~ .,
+  data = train_reg,
+  max.depth = 30.00000,
+  num.trees = 2000,
+  mtry = 3,
+  sample.fraction = 0.8,
+  importance = "permutation",
+  min.node.size = 1
+)
+
+## Feature importance
+imp_impurity <- vip(ranger_impurity,num_features = 11,bar = FALSE )
+imp_permutation <- vip(ranger_permitaion,num_features = 11,bar = FALSE)
+
+# Viz the importance
+gridExtra::grid.arrange(imp_impurity,imp_permutation,nrow = 1)
+
+## Note the top 3 important features are :
+ # 1 density
+ # 2 residual_sugar
+ # 3 free_sulfur_dioxide
+
+## Predictions 
+random_forest_prediction <- predict(ranger_permitaion,test_reg)
+
+# Convert the ranger.prediction into factor 
+predicted_classes <- as.factor(random_forest_prediction$predictions)
+
+## Create a confusion matrix
+confusionMatrix(
+  data = relevel(predicted_classes,ref = "bad"),
+  reference = relevel(test_reg$category_good,ref = "bad")
+)
+
+h2o.removeAll()
