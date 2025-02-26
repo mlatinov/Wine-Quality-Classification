@@ -9,6 +9,8 @@ library(ROCR)
 library(earth)
 library(ranger)
 library(vip)
+library(gbm)
+
 ## Load the data from EDA FE
 
 # Preprocess data
@@ -243,12 +245,13 @@ confusionMatrix(
 
 # Note : MARS 
  #  Accuracy : 0.6179
- # Sensitivity : 0.4714        
+ #  Sensitivity : 0.4714        
  #  Specificity : 0.8133 
 
 #### Random Forest ####
 
 # Starting H2O
+Sys.setenv(JAVA_HOME = "C:/Program Files/Eclipse Adoptium/jdk-11.0.26.4-hotspot")
 h2o.init()
 
 # Convert the training set as h20 objects
@@ -369,4 +372,59 @@ confusionMatrix(
   reference = relevel(test_reg$category_good,ref = "bad")
 )
 
+#### Gradient boosting machines  ####
+
+## Convert the response to be numeric and save it into gbm_train
+
+gbm_train <-train_reg
+gbm_train$category_good <- as.numeric(gbm_train$category_good)-1
+
+## Run a Basic GBM model 
+gbm_model_1 <- gbm(formula = category_good ~ .,
+                   data = gbm_train,
+                   distribution = "bernoulli", # Logistic regression for 0-1 outcomes
+                   n.trees = 1000,             # Number of trees to fit
+                   interaction.depth = 1,      # Highest level of variable interactions allowed
+                   shrinkage = 0.1,            # Learning Rate
+                   n.minobsinnode = 10,        # Minimum number of observations in the terminal nodes
+                   cv.folds = 10
+                   )
+
+# Viz the ntree
+gbm.perf(gbm_model_1,method = "cv")
+
+# Find the index for ntree with min CV Error
+best_performance_gbm_model_1 <- which.min(gbm_model_1$cv.error)
+
+## Predict on the testing set
+
+# Convert the response to numeric
+gbm_test <- test_reg
+gbm_test$category_good <- as.numeric(gbm_test$category_good)-1
+
+## Predictions 
+
+# Compute the prob
+gbm_m1_predict <- predict(gbm_model_1,gbm_test, type = "response")
+
+# Compute the AUC metrics
+perf_1_gbm <- prediction(gbm_m1_predict,gbm_test$category_good)%>%
+  performance(measure = "tpr",x.measure = "fpr")
+
+## Create a Confusion matrix
+
+# Convert the prob in 0 and 1 at 50 % level
+gbm_m1_pred_class <- ifelse(test = gbm_m1_predict > 0.5,"0","1")
+gbm_m1_pred_class <- factor(gbm_m1_pred_class,ordered = FALSE)
+
+gbm_test$category_good <- factor(gbm_test$category_good,ordered = FALSE)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(data = relevel(gbm_m1_pred_class,ref = "1"),
+                               reference = relevel(gbm_test$category_good,ref = "1"))
+
+print(conf_matrix)
+
 h2o.removeAll()
+
+
