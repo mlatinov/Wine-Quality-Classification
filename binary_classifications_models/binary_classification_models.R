@@ -159,7 +159,7 @@ confusionMatrix(
   reference = relevel(test_reg$category_good, ref = "0")
 )
 
-# KNN : Only on the Preprocess data
+#### KNN #### 
 
 # Create a resampling method 
 cv <-trainControl(
